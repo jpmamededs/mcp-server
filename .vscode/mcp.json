@@ -1,0 +1,16 @@
+{
+	"servers": {
+		"local-mcp-server": {
+			"url": "http://localhost:7071/runtime/webhooks/mcp",
+			"type": "http"
+		},
+		"remote-mcp-server": {
+			"url": "https://funcapp-drdqbsawdyaxf4be.centralus-01.azurewebsites.net/runtime/webhooks/mcp",
+			"type": "http",
+            "headers": {
+                "x-functions-key": "nrWCmcUJKXkw3EWN6HWTlEBCjeUMmuG2cgIVmdId91uqAzFuGEq0-w=="
+            }
+		}
+	},
+	"inputs": []
+}
