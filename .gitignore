@@ -48,5 +48,10 @@ __pycache__/
 __blobstorage__
 __queuestorage__
 __tablestorage__/
+
+# GitHub Token e variáveis sensíveis
+GITHUB_TOKEN
+.github_token
+.secrets
 __azurite_db*__.json
 AzuriteConfig
