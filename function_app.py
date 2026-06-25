@@ -136,6 +136,61 @@ def search_files(owner: str, repo: str, query: str, language: str = None) -> dic
         return {"success": False, "error": str(e)}
 
 @app.mcp_tool()
+def get_file_content_raw(owner: str, repo: str, path: str, ref: str = None, max_bytes: int = 5000) -> dict:
+    """Lê o conteúdo bruto de um arquivo no repositório (texto)."""
+    try:
+        url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/contents/{path}"
+        params = {}
+        if ref:
+            params["ref"] = ref
+
+        with httpx.Client() as client:
+            response = client.get(url, headers=get_headers(), params=params)
+            response.raise_for_status()
+            payload = response.json()
+
+        if payload.get("type") != "file":
+            return {
+                "success": False,
+                "error": "O caminho informado nao e um arquivo.",
+                "path": path,
+            }
+
+        size = int(payload.get("size", 0))
+        if size > max_bytes:
+            return {
+                "success": False,
+                "error": f"Arquivo excede limite max_bytes={max_bytes}.",
+                "path": path,
+                "size": size,
+            }
+
+        encoding = payload.get("encoding")
+        if encoding != "base64":
+            return {
+                "success": False,
+                "error": f"Encoding nao suportado: {encoding}",
+                "path": path,
+            }
+
+        raw_b64 = payload.get("content", "").replace("\n", "")
+        raw_bytes = base64.b64decode(raw_b64)
+        text = raw_bytes.decode("utf-8", errors="replace")
+
+        return {
+            "success": True,
+            "owner": owner,
+            "repo": repo,
+            "path": payload.get("path", path),
+            "ref": ref,
+            "sha": payload.get("sha"),
+            "size": size,
+            "content": text,
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+@app.mcp_tool()
 def get_pr_diff(owner: str, repo: str, pr_number: int) -> dict:
     """Captura o diff de um Pull Request."""
     try:
