@@ -30,9 +30,39 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-      - name: Validate Azure Login
+      - name: Debug Azure Account
         run: |
+          echo "===== AZ ACCOUNT ====="
           az account show
+
+      - name: Debug Service Principal
+        continue-on-error: true
+        run: |
+          echo "===== SERVICE PRINCIPAL ====="
+
+          az ad sp show \
+            --id ${{ secrets.AZURE_CLIENT_ID }} \
+            --query "{appId:appId,id:id,displayName:displayName}" \
+            -o json
+
+      - name: List Role Assignments
+        continue-on-error: true
+        run: |
+          echo "===== ROLE ASSIGNMENTS ====="
+
+          az role assignment list \
+            --assignee ${{ secrets.AZURE_CLIENT_ID }} \
+            --all \
+            -o table
+
+      - name: List AML Workspaces
+        continue-on-error: true
+        run: |
+          echo "===== AML WORKSPACES ====="
+
+          az resource list \
+            --resource-type Microsoft.MachineLearningServices/workspaces \
+            -o table
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -42,20 +72,64 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install "azure-ai-projects>=2.1.0"
-          pip install azure-identity
-          pip install openai
+
+          pip install \
+            "azure-ai-projects>=2.1.0" \
+            azure-identity \
+            openai
+
+      - name: Validate Foundry Access
+        continue-on-error: true
+        env:
+          PROJECT_ENDPOINT: ${{ secrets.PROJECT_ENDPOINT }}
+        run: |
+          cat > validate_access.py << 'PY'
+          from azure.identity import DefaultAzureCredential
+          from azure.ai.projects import AIProjectClient
+
+          endpoint = "${PROJECT_ENDPOINT}"
+
+          print("Endpoint:", endpoint)
+
+          client = AIProjectClient(
+              endpoint=endpoint,
+              credential=DefaultAzureCredential(),
+              allow_preview=True
+          )
+
+          print("Listing agents...")
+
+          try:
+              agents = client.agents.list()
+
+              for agent in agents:
+                  print("Agent:", getattr(agent, "name", "unknown"))
+
+              print("SUCCESS")
+
+          except Exception as e:
+              print("ERROR:")
+              print(str(e))
+              raise
+          PY
+
+          sed -i "s|\${PROJECT_ENDPOINT}|$PROJECT_ENDPOINT|g" validate_access.py
+
+          python validate_access.py
 
       - name: Create runner script
         run: |
-          cat > run_agent.py << 'EOF'
+          cat > run_agent.py << 'PY'
           import os
+
           from azure.identity import DefaultAzureCredential
           from azure.ai.projects import AIProjectClient
           from azure.ai.projects.models import VersionRefIndicator
 
           endpoint = os.environ["PROJECT_ENDPOINT"]
           agent_name = "b3agent"
+
+          print("Using endpoint:", endpoint)
 
           with (
               DefaultAzureCredential() as credential,
@@ -66,11 +140,15 @@ jobs:
               ) as project_client,
           ):
 
+              print("Getting agent...")
+
               agent = project_client.agents.get(
-                  agent_name=agent_name
+                  agent_name
               )
 
               latest_version = agent.versions["latest"].version
+
+              print("Latest version:", latest_version)
 
               session = project_client.beta.agents.create_session(
                   agent_name=agent_name,
@@ -81,6 +159,7 @@ jobs:
               )
 
               try:
+
                   openai_client = project_client.get_openai_client(
                       agent_name=agent_name
                   )
@@ -95,27 +174,21 @@ jobs:
                   print(response.output_text)
 
               finally:
+
                   project_client.beta.agents.delete_session(
                       agent_name=agent_name,
                       session_id=session.agent_session_id,
                       isolation_key=os.environ["ISOLATION_KEY"],
                   )
-          EOF
+          PY
 
-      - name: Run Foundry Agent
-        run: |
-          python run_agent.py > review.md
-          cat review.md
-
+      - name: Run Agent
         env:
           PROJECT_ENDPOINT: ${{ secrets.PROJECT_ENDPOINT }}
-
           ISOLATION_KEY: pr-${{ github.event.pull_request.number }}-${{ github.run_id }}
 
           PROMPT: |
             Use exclusivamente as ferramentas GitHub MCP.
-
-            Analise o Pull Request:
 
             Repository:
             ${{ github.repository }}
@@ -132,37 +205,19 @@ jobs:
             Commit SHA:
             ${{ github.event.pull_request.head.sha }}
 
-            Execute:
+            Localize o PR.
+            Leia os arquivos alterados.
+            Leia o diff.
+            Gere um review em Markdown.
 
-            1. Localize o Pull Request.
-            2. Leia os arquivos alterados.
-            3. Leia o diff.
-            4. Analise:
-               - OWASP Top 10
-               - Segurança
-               - Bugs
-               - Performance
-               - Arquitetura
-               - Manutenibilidade
-            5. Gere um review em Markdown.
+        run: |
+          python run_agent.py > review.md
 
-            Estrutura:
-
-            ## Summary
-
-            ## Security
-
-            ## Architecture
-
-            ## Performance
-
-            ## Maintainability
-
-            ## Suggested Improvements
-
-            ## Approval Recommendation
+          echo "===== REVIEW ====="
+          cat review.md
 
       - name: Publish Review
+        if: success()
         uses: actions/github-script@v8
         with:
           script: |
