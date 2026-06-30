@@ -202,3 +202,23 @@ jobs:
                 body
               });
             }
+
+  human_approval:
+    needs: review
+    runs-on: ubuntu-latest
+    environment:
+      name: foundry-review-approval
+
+    steps:
+      - name: Wait for Human Approval
+        run: |
+          echo "Human approval granted."
+
+  final_status:
+    needs: human_approval
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Success
+        run: |
+          echo "PR reviewed by Foundry Agent and approved by a human reviewer."
