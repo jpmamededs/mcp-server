@@ -59,7 +59,7 @@ jobs:
           python-version: "3.11"
 
       - name: Install Azure AI dependencies
-        run: pip install azure-ai-projects azure-identity
+        run: pip install azure-ai-projects
 
       - name: Listar arquivos alterados no PR
         run: |
@@ -71,9 +71,7 @@ jobs:
         env:
           AZURE_AI_FOUNDRY_ENDPOINT: ${{ secrets.AZURE_AI_FOUNDRY_ENDPOINT }}
           AZURE_AI_FOUNDRY_AGENT_ID: ${{ secrets.AZURE_AI_FOUNDRY_AGENT_ID }}
-          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
-          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_AI_FOUNDRY_API_KEY: ${{ secrets.AZURE_AI_FOUNDRY_API_KEY }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           REPO: ${{ github.repository }}
@@ -81,14 +79,10 @@ jobs:
           python - << 'EOF'
           import os, json, time, urllib.request
           from azure.ai.projects import AIProjectClient
-          from azure.identity import ClientSecretCredential
+          from azure.core.credentials import AzureKeyCredential
 
-          # ── Autenticação ──────────────────────────────────────────────────────
-          credential = ClientSecretCredential(
-              tenant_id=os.environ["AZURE_TENANT_ID"],
-              client_id=os.environ["AZURE_CLIENT_ID"],
-              client_secret=os.environ["AZURE_CLIENT_SECRET"],
-          )
+          # ── Autenticação via API Key (sem App Registration) ───────────────────
+          credential = AzureKeyCredential(os.environ["AZURE_AI_FOUNDRY_API_KEY"])
           client = AIProjectClient(
               endpoint=os.environ["AZURE_AI_FOUNDRY_ENDPOINT"],
               credential=credential,
