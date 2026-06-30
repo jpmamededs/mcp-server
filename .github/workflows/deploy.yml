@@ -92,9 +92,9 @@ jobs:
           print(f"🤖 Agente ID: {agent_id if agent_id else '(não informado)'}")
           print(f"🤖 Agente Nome: {agent_name if agent_name else '(não informado)'}")
 
-            # Se o nome não foi informado, tenta usar o valor do ID como fallback.
-            # Em vários setups esse secret guarda o nome lógico do agente.
-            if not agent_name and agent_id:
+          # Se o nome não foi informado, tenta usar o valor do ID como fallback.
+          # Em vários setups esse secret guarda o nome lógico do agente.
+          if not agent_name and agent_id:
               agent_name = agent_id
 
           # ── Ler conteúdo dos arquivos alterados ───────────────────────────────
