@@ -1,0 +1,193 @@
+name: MCP Server CI — Demo Pipeline
+
+on:
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  # ── 1. Validação ─────────────────────────────────────────────────────────────
+  validate:
+    name: Validate & Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Lint with flake8
+        run: |
+          pip install flake8
+          flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+          flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+
+      - name: Run tests (if available)
+        run: |
+          if [ -f "test_mcp_github.py" ]; then
+            pip install pytest
+            pytest test_mcp_github.py -v
+          else
+            echo "Nenhum arquivo de testes encontrado, pulando etapa."
+          fi
+
+  # ── 2. Avaliação por IA (Azure AI Foundry) ───────────────────────────────────
+  ai-review:
+    name: Avaliação por Agente IA
+    needs: validate
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write   # necessário para postar comentário no PR
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # histórico completo para comparar branches
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Azure AI dependencies
+        run: pip install azure-ai-projects
+
+      - name: Listar arquivos alterados no PR
+        run: |
+          git diff --name-only origin/${{ github.base_ref }}...HEAD > changed_files.txt
+          echo "=== Arquivos alterados ==="
+          cat changed_files.txt
+
+      - name: Executar avaliação com agente Azure AI Foundry
+        env:
+          AZURE_AI_FOUNDRY_ENDPOINT: ${{ secrets.AZURE_AI_FOUNDRY_ENDPOINT }}
+          AZURE_AI_FOUNDRY_AGENT_ID: ${{ secrets.AZURE_AI_FOUNDRY_AGENT_ID }}
+          AZURE_AI_FOUNDRY_API_KEY: ${{ secrets.AZURE_AI_FOUNDRY_API_KEY }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          python - << 'EOF'
+          import os, json, time, urllib.request
+          from azure.ai.projects import AIProjectClient
+          from azure.core.credentials import AzureKeyCredential
+
+          # ── Autenticação via API Key (sem App Registration) ───────────────────
+          credential = AzureKeyCredential(os.environ["AZURE_AI_FOUNDRY_API_KEY"])
+          client = AIProjectClient(
+              endpoint=os.environ["AZURE_AI_FOUNDRY_ENDPOINT"],
+              credential=credential,
+          )
+          agent_id = os.environ["AZURE_AI_FOUNDRY_AGENT_ID"]
+
+          # ── Ler conteúdo dos arquivos alterados ───────────────────────────────
+          MAX_CHARS_PER_FILE = 8_000   # evita ultrapassar o limite de tokens
+          with open("changed_files.txt") as f:
+              changed_files = [l.strip() for l in f if l.strip()]
+
+          files_block = ""
+          for path in changed_files:
+              if os.path.exists(path):
+                  try:
+                      with open(path, encoding="utf-8", errors="replace") as f:
+                          content = f.read(MAX_CHARS_PER_FILE)
+                      files_block += f"\n\n### `{path}`\n```\n{content}\n```"
+                  except Exception as e:
+                      files_block += f"\n\n### `{path}`\n*(erro ao ler: {e})*"
+              else:
+                  files_block += f"\n\n### `{path}`\n*(arquivo removido ou não encontrado)*"
+
+          if not files_block:
+              files_block = "\nNenhum arquivo de código identificado."
+
+          prompt = (
+              "Você é um revisor técnico de código. Analise os arquivos alterados neste Pull Request "
+              "e forneça uma avaliação com os seguintes tópicos:\n"
+              "1. **Resumo das mudanças** — o que foi alterado e por quê (inferido pelo código)\n"
+              "2. **Possíveis problemas ou riscos** — bugs, falhas de segurança, lógica incorreta\n"
+              "3. **Boas práticas** — o que está bem feito e o que poderia melhorar\n"
+              "4. **Recomendação final** — Aprovar ✅ ou Solicitar ajustes 🔄\n\n"
+              f"Arquivos alterados:{files_block}"
+          )
+
+          # ── Criar thread e executar agente ────────────────────────────────────
+          thread = client.agents.create_thread()
+          client.agents.create_message(thread_id=thread.id, role="user", content=prompt)
+          run = client.agents.create_run(thread_id=thread.id, agent_id=agent_id)
+
+          # Aguardar conclusão
+          while run.status in ("queued", "in_progress", "requires_action"):
+              time.sleep(3)
+              run = client.agents.get_run(thread_id=thread.id, run_id=run.id)
+
+          if run.status != "completed":
+              raise RuntimeError(f"Agente encerrou com status inesperado: {run.status}")
+
+          # ── Recuperar resposta ────────────────────────────────────────────────
+          messages = client.agents.list_messages(thread_id=thread.id)
+          response_text = next(
+              (m.content[0].text.value for m in messages.data if m.role == "assistant"),
+              "O agente não retornou uma avaliação.",
+          )
+
+          # ── Postar como comentário no PR ──────────────────────────────────────
+          changed_list = "\n".join(f"- `{p}`" for p in changed_files) or "- (nenhum)"
+          body = (
+              "## 🤖 Avaliação do Agente Azure AI Foundry\n\n"
+              f"**Arquivos analisados:**\n{changed_list}\n\n"
+              "---\n\n"
+              f"{response_text}"
+          )
+          payload = json.dumps({"body": body}).encode()
+          req = urllib.request.Request(
+              f"https://api.github.com/repos/{os.environ['REPO']}/issues/{os.environ['PR_NUMBER']}/comments",
+              data=payload,
+              headers={
+                  "Authorization": f"Bearer {os.environ['GH_TOKEN']}",
+                  "Content-Type": "application/json",
+                  "Accept": "application/vnd.github.v3+json",
+              },
+              method="POST",
+          )
+          urllib.request.urlopen(req)
+          print("✅ Avaliação postada como comentário no PR.")
+          EOF
+
+  # ── 3. Aprovação humana ───────────────────────────────────────────────────────
+  # Para ativar a pausa: Settings → Environments → approval → Required reviewers
+  approval:
+    name: Aguardar Aprovação Humana
+    needs: ai-review
+    runs-on: ubuntu-latest
+    environment: approval   # <-- revisor clica em "Approve" no GitHub antes de continuar
+
+    steps:
+      - name: Aprovação recebida
+        run: echo "✅ Aprovação concedida. Prosseguindo para o deploy simulado."
+
+  # ── 3. Deploy simulado (demo) ────────────────────────────────────────────────
+  deploy:
+    name: Deploy (Simulado)
+    needs: approval
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Simular deploy
+        run: |
+          echo "🚀 Iniciando deploy simulado do MCP Server..."
+          echo "   Repositório : ${{ github.repository }}"
+          echo "   Branch      : ${{ github.head_ref }}"
+          echo "   Commit      : ${{ github.sha }}"
+          echo "✅ Deploy simulado concluído com sucesso!"
