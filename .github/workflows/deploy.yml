@@ -77,7 +77,7 @@ jobs:
           REPO: ${{ github.repository }}
         run: |
           python - << 'EOF'
-          import os, json, urllib.request
+          import os, json, urllib.request, urllib.error
 
           # Configuração
           endpoint = os.environ["AZURE_AI_FOUNDRY_ENDPOINT"].rstrip("/")
@@ -91,6 +91,11 @@ jobs:
           print(f"✅ Conectando a {endpoint}")
           print(f"🤖 Agente ID: {agent_id if agent_id else '(não informado)'}")
           print(f"🤖 Agente Nome: {agent_name if agent_name else '(não informado)'}")
+
+            # Se o nome não foi informado, tenta usar o valor do ID como fallback.
+            # Em vários setups esse secret guarda o nome lógico do agente.
+            if not agent_name and agent_id:
+              agent_name = agent_id
 
           # ── Ler conteúdo dos arquivos alterados ───────────────────────────────
           MAX_CHARS_PER_FILE = 8_000
@@ -125,33 +130,69 @@ jobs:
               if not agent_id and not agent_name:
                 raise RuntimeError("Defina AZURE_AI_FOUNDRY_AGENT_ID (ou AZURE_AI_FOUNDRY_AGENT_NAME) nos secrets")
 
-              print("🤖 Chamando endpoint /openai/v1/responses...")
-              agent_reference = {"type": "agent_reference"}
-              if agent_id:
-                agent_reference["id"] = agent_id
+              # Descobrir URL correta de responses por tipo de endpoint.
+              is_app_endpoint = "/applications/" in endpoint and endpoint.endswith("/protocols/openai")
+              if is_app_endpoint:
+                responses_url = f"{endpoint}/responses?api-version=2025-11-15-preview"
+              elif endpoint.endswith("/openai/v1"):
+                responses_url = f"{endpoint}/responses"
               else:
-                agent_reference["name"] = agent_name
+                responses_url = f"{endpoint}/openai/v1/responses"
 
-              payload = json.dumps(
-                {
-                  "input": prompt,
-                  "agent_reference": agent_reference,
-                }
-              ).encode("utf-8")
+              print(f"🤖 Chamando endpoint: {responses_url}")
 
-              req = urllib.request.Request(
-                f"{endpoint}/openai/v1/responses",
-                data=payload,
-                headers={
-                  "api-key": api_key,
-                  "Content-Type": "application/json",
-                },
-                method="POST",
-              )
+              def call_responses(body_dict):
+                req = urllib.request.Request(
+                  responses_url,
+                  data=json.dumps(body_dict).encode("utf-8"),
+                  headers={
+                    "api-key": api_key,
+                    "Content-Type": "application/json",
+                  },
+                  method="POST",
+                )
+                with urllib.request.urlopen(req) as resp:
+                  return json.loads(resp.read().decode("utf-8", errors="replace"))
 
-              with urllib.request.urlopen(req) as resp:
-                raw = resp.read().decode("utf-8", errors="replace")
-              data = json.loads(raw)
+              attempts = []
+              if is_app_endpoint:
+                # Agent Application já está ligado a um agente publicado.
+                attempts.append({"input": prompt})
+              else:
+                # Projeto Foundry: tenta forma por nome e depois por id.
+                if agent_name:
+                  attempts.append({
+                    "input": prompt,
+                    "agent_reference": {"type": "agent_reference", "name": agent_name},
+                  })
+                if agent_id and agent_id != agent_name:
+                  attempts.append({
+                    "input": prompt,
+                    "agent_reference": {"type": "agent_reference", "id": agent_id},
+                  })
+
+              data = None
+              last_error = None
+              for i, body_dict in enumerate(attempts, start=1):
+                try:
+                  print(f"🔁 Tentativa {i}/{len(attempts)}")
+                  data = call_responses(body_dict)
+                  break
+                except urllib.error.HTTPError as he:
+                  err_body = ""
+                  try:
+                    err_body = he.read().decode("utf-8", errors="replace")
+                  except Exception:
+                    pass
+                  print(f"⚠️ HTTP {he.code} na tentativa {i}: {he.reason}")
+                  if err_body:
+                    print("📄 Corpo do erro:")
+                    print(err_body)
+                  last_error = he
+
+              if data is None:
+                raise last_error or RuntimeError("Falha ao chamar endpoint de responses")
+
               response_text = data.get("output_text", "")
               if not response_text:
                 # fallback para casos em que output_text não venha preenchido
