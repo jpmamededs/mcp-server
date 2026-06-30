@@ -82,6 +82,7 @@ jobs:
           python - << 'EOF'
           import os, json, urllib.request
           from azure.ai.projects import AIProjectClient
+          from azure.ai.projects.models import VersionRefIndicator
           from azure.core.credentials import AzureKeyCredential
 
           # Configuração
@@ -131,10 +132,18 @@ jobs:
                   credential=credential,
                   allow_preview=True,
               ) as project_client:
+                  # ── Obter versão mais recente do agente ────────────────────────
+                  print("📋 Obtendo versão mais recente do agente...")
+                  agent = project_client.agents.get(agent_name=agent_name)
+                  agent_version = agent.versions["latest"].version
+                  print(f"✅ Versão: {agent_version}")
+
+                  # ── Criar sessão ──────────────────────────────────────────────────
                   print("📝 Criando sessão...")
                   session = project_client.beta.agents.create_session(
                       agent_name=agent_name,
                       isolation_key="github-actions",
+                      version_indicator=VersionRefIndicator(agent_version=agent_version),
                   )
                   print(f"✅ Sessão criada: {session.agent_session_id}")
 
