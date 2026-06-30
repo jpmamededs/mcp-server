@@ -55,3 +55,4 @@ GITHUB_TOKEN
 .secrets
 __azurite_db*__.json
 AzuriteConfig
+test
