@@ -1,4 +1,4 @@
-name: AI PR Review
+name: Foundry PR Review
 
 on:
   pull_request:
@@ -7,53 +7,150 @@ on:
       - synchronize
       - reopened
 
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write
+  issues: write
+
 jobs:
   review:
     runs-on: ubuntu-latest
 
-    permissions:
-      pull-requests: write
-      contents: read
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
 
-      - name: Install jq
-        run: sudo apt-get update && sudo apt-get install jq -y
+      - uses: actions/checkout@v4
 
-      - name: Call Foundry Agent
-        id: agent
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
         run: |
-          RESPONSE=$(curl -s \
-            -X POST "${{ secrets.FOUNDRY_ENDPOINT }}" \
-            -H "api-key: ${{ secrets.FOUNDRY_API_KEY }}" \
-            -H "Content-Type: application/json" \
-            -d "{
-              \"messages\": [
-                {
-                  \"role\": \"user\",
-                  \"content\": \"Review Pull Request #${{ github.event.pull_request.number }} from repository ${{ github.repository }} using GitHub MCP tools.\"
-                }
-              ]
-            }")
+          pip install --upgrade pip
+          pip install "azure-ai-projects>=2.1.0"
+          pip install azure-identity
+          pip install openai
 
-          echo "$RESPONSE" > response.json
+      - name: Create runner script
+        run: |
+          cat > run_agent.py << 'EOF'
+          import os
 
-          REVIEW=$(jq -r '.choices[0].message.content' response.json)
+          from azure.identity import DefaultAzureCredential
+          from azure.ai.projects import AIProjectClient
+          from azure.ai.projects.models import VersionRefIndicator
 
-          {
-            echo 'review<<EOF'
-            echo "$REVIEW"
-            echo EOF
-          } >> "$GITHUB_OUTPUT"
+          endpoint = os.environ["PROJECT_ENDPOINT"]
+          agent_name = "b3agent"
 
-      - name: Publish Review
-        uses: actions/github-script@v7
+          with (
+              DefaultAzureCredential() as credential,
+              AIProjectClient(
+                  endpoint=endpoint,
+                  credential=credential,
+                  allow_preview=True,
+              ) as project_client,
+          ):
+
+              agent = project_client.agents.get(
+                  agent_name=agent_name
+              )
+
+              latest_version = agent.versions["latest"].version
+
+              session = project_client.beta.agents.create_session(
+                  agent_name=agent_name,
+                  isolation_key=os.environ["ISOLATION_KEY"],
+                  version_indicator=VersionRefIndicator(
+                      agent_version=latest_version
+                  ),
+              )
+
+              try:
+
+                  openai_client = project_client.get_openai_client(
+                      agent_name=agent_name
+                  )
+
+                  response = openai_client.responses.create(
+                      input=os.environ["PROMPT"],
+                      extra_body={
+                          "agent_session_id": session.agent_session_id
+                      }
+                  )
+
+                  print(response.output_text)
+
+              finally:
+
+                  project_client.beta.agents.delete_session(
+                      agent_name=agent_name,
+                      session_id=session.agent_session_id,
+                      isolation_key=os.environ["ISOLATION_KEY"],
+                  )
+          EOF
+
+      - name: Run Agent
+        run: |
+          python run_agent.py > review.md
+
+        env:
+          PROJECT_ENDPOINT: ${{ secrets.PROJECT_ENDPOINT }}
+
+          ISOLATION_KEY: |
+            pr-${{ github.event.pull_request.number }}-${{ github.run_id }}
+
+          PROMPT: |
+            Use o GitHub MCP.
+
+            Analise o Pull Request:
+
+            Repository:
+            ${{ github.repository }}
+
+            PR Number:
+            ${{ github.event.pull_request.number }}
+
+            Branch:
+            ${{ github.event.pull_request.head.ref }}
+
+            Commit:
+            ${{ github.event.pull_request.head.sha }}
+
+            Execute:
+
+            1. Localize o Pull Request.
+            2. Leia o diff.
+            3. Leia os arquivos alterados.
+            4. Analise:
+               - OWASP
+               - Segurança
+               - Bugs
+               - Performance
+               - Arquitetura
+               - Manutenibilidade
+            5. Gere um review em Markdown.
+
+      - name: Publish Comment
+        uses: actions/github-script@v8
+
         with:
           script: |
-            const review = `${{ steps.agent.outputs.review }}`;
+            const fs = require('fs');
+
+            const review = fs.readFileSync(
+              'review.md',
+              'utf8'
+            );
 
             await github.rest.issues.createComment({
               owner: context.repo.owner,
