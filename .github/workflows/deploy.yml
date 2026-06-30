@@ -1,7 +1,9 @@
 name: Foundry PR Review
 
 on:
-  pull_request:
+  pull_request_target:
+    branches:
+      - main
     types:
       - opened
       - synchronize
@@ -28,6 +30,10 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
+      - name: Validate Azure Login
+        run: |
+          az account show
+
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
@@ -35,7 +41,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install --upgrade pip
+          python -m pip install --upgrade pip
           pip install "azure-ai-projects>=2.1.0"
           pip install azure-identity
           pip install openai
@@ -44,7 +50,6 @@ jobs:
         run: |
           cat > run_agent.py << 'EOF'
           import os
-
           from azure.identity import DefaultAzureCredential
           from azure.ai.projects import AIProjectClient
           from azure.ai.projects.models import VersionRefIndicator
@@ -76,7 +81,6 @@ jobs:
               )
 
               try:
-
                   openai_client = project_client.get_openai_client(
                       agent_name=agent_name
                   )
@@ -91,7 +95,6 @@ jobs:
                   print(response.output_text)
 
               finally:
-
                   project_client.beta.agents.delete_session(
                       agent_name=agent_name,
                       session_id=session.agent_session_id,
@@ -99,40 +102,43 @@ jobs:
                   )
           EOF
 
-      - name: Run Agent
+      - name: Run Foundry Agent
         run: |
           python run_agent.py > review.md
+          cat review.md
 
         env:
           PROJECT_ENDPOINT: ${{ secrets.PROJECT_ENDPOINT }}
 
-          ISOLATION_KEY: |
-            pr-${{ github.event.pull_request.number }}-${{ github.run_id }}
+          ISOLATION_KEY: pr-${{ github.event.pull_request.number }}-${{ github.run_id }}
 
           PROMPT: |
-            Use o GitHub MCP.
+            Use exclusivamente as ferramentas GitHub MCP.
 
             Analise o Pull Request:
 
             Repository:
             ${{ github.repository }}
 
-            PR Number:
-            ${{ github.event.pull_request.number }}
+            Pull Request:
+            #${{ github.event.pull_request.number }}
 
-            Branch:
+            Base Branch:
+            ${{ github.event.pull_request.base.ref }}
+
+            Source Branch:
             ${{ github.event.pull_request.head.ref }}
 
-            Commit:
+            Commit SHA:
             ${{ github.event.pull_request.head.sha }}
 
             Execute:
 
             1. Localize o Pull Request.
-            2. Leia o diff.
-            3. Leia os arquivos alterados.
+            2. Leia os arquivos alterados.
+            3. Leia o diff.
             4. Analise:
-               - OWASP
+               - OWASP Top 10
                - Segurança
                - Bugs
                - Performance
@@ -140,9 +146,24 @@ jobs:
                - Manutenibilidade
             5. Gere um review em Markdown.
 
-      - name: Publish Comment
-        uses: actions/github-script@v8
+            Estrutura:
 
+            ## Summary
+
+            ## Security
+
+            ## Architecture
+
+            ## Performance
+
+            ## Maintainability
+
+            ## Suggested Improvements
+
+            ## Approval Recommendation
+
+      - name: Publish Review
+        uses: actions/github-script@v8
         with:
           script: |
             const fs = require('fs');
