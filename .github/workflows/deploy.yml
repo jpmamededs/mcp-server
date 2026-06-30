@@ -20,8 +20,8 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
       - name: Azure Login
         uses: azure/login@v2
@@ -29,40 +29,6 @@ jobs:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-
-      - name: Debug Azure Account
-        run: |
-          echo "===== AZ ACCOUNT ====="
-          az account show
-
-      - name: Debug Service Principal
-        continue-on-error: true
-        run: |
-          echo "===== SERVICE PRINCIPAL ====="
-
-          az ad sp show \
-            --id ${{ secrets.AZURE_CLIENT_ID }} \
-            --query "{appId:appId,id:id,displayName:displayName}" \
-            -o json
-
-      - name: List Role Assignments
-        continue-on-error: true
-        run: |
-          echo "===== ROLE ASSIGNMENTS ====="
-
-          az role assignment list \
-            --assignee ${{ secrets.AZURE_CLIENT_ID }} \
-            --all \
-            -o table
-
-      - name: List AML Workspaces
-        continue-on-error: true
-        run: |
-          echo "===== AML WORKSPACES ====="
-
-          az resource list \
-            --resource-type Microsoft.MachineLearningServices/workspaces \
-            -o table
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -72,64 +38,22 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
+          pip install "azure-ai-projects>=2.1.0" azure-identity openai
 
-          pip install \
-            "azure-ai-projects>=2.1.0" \
-            azure-identity \
-            openai
-
-      - name: Validate Foundry Access
-        continue-on-error: true
-        env:
-          PROJECT_ENDPOINT: ${{ secrets.PROJECT_ENDPOINT }}
-        run: |
-          cat > validate_access.py << 'PY'
-          from azure.identity import DefaultAzureCredential
-          from azure.ai.projects import AIProjectClient
-
-          endpoint = "${PROJECT_ENDPOINT}"
-
-          print("Endpoint:", endpoint)
-
-          client = AIProjectClient(
-              endpoint=endpoint,
-              credential=DefaultAzureCredential(),
-              allow_preview=True
-          )
-
-          print("Listing agents...")
-
-          try:
-              agents = client.agents.list()
-
-              for agent in agents:
-                  print("Agent:", getattr(agent, "name", "unknown"))
-
-              print("SUCCESS")
-
-          except Exception as e:
-              print("ERROR:")
-              print(str(e))
-              raise
-          PY
-
-          sed -i "s|\${PROJECT_ENDPOINT}|$PROJECT_ENDPOINT|g" validate_access.py
-
-          python validate_access.py
-
-      - name: Create runner script
+      - name: Create Foundry runner script
         run: |
           cat > run_agent.py << 'PY'
           import os
+          import sys
 
           from azure.identity import DefaultAzureCredential
           from azure.ai.projects import AIProjectClient
           from azure.ai.projects.models import VersionRefIndicator
 
           endpoint = os.environ["PROJECT_ENDPOINT"]
-          agent_name = "b3agent"
-
-          print("Using endpoint:", endpoint)
+          agent_name = os.environ.get("AGENT_NAME", "b3agent")
+          isolation_key = os.environ["ISOLATION_KEY"]
+          prompt = os.environ["PROMPT"]
 
           with (
               DefaultAzureCredential() as credential,
@@ -139,62 +63,70 @@ jobs:
                   allow_preview=True,
               ) as project_client,
           ):
-
-              print("Getting agent...")
-
               agent = project_client.agents.get(
-                  agent_name
+                  agent_name=agent_name
               )
 
               latest_version = agent.versions["latest"].version
 
-              print("Latest version:", latest_version)
-
               session = project_client.beta.agents.create_session(
                   agent_name=agent_name,
-                  isolation_key=os.environ["ISOLATION_KEY"],
+                  isolation_key=isolation_key,
                   version_indicator=VersionRefIndicator(
                       agent_version=latest_version
                   ),
               )
 
               try:
-
                   openai_client = project_client.get_openai_client(
                       agent_name=agent_name
                   )
 
                   response = openai_client.responses.create(
-                      input=os.environ["PROMPT"],
+                      input=prompt,
                       extra_body={
                           "agent_session_id": session.agent_session_id
-                      }
+                      },
                   )
 
-                  print(response.output_text)
+                  output_text = getattr(response, "output_text", None)
+
+                  if not output_text or not output_text.strip():
+                      print("## Foundry Agent PR Review")
+                      print()
+                      print("O agente executou, mas não retornou conteúdo em `response.output_text`.")
+                      print()
+                      print("Verifique se o GitHub MCP do agente consegue acessar este Pull Request.")
+                      sys.exit(0)
+
+                  print(output_text)
 
               finally:
-
                   project_client.beta.agents.delete_session(
                       agent_name=agent_name,
                       session_id=session.agent_session_id,
-                      isolation_key=os.environ["ISOLATION_KEY"],
+                      isolation_key=isolation_key,
                   )
           PY
 
-      - name: Run Agent
+      - name: Run Foundry Agent
         env:
           PROJECT_ENDPOINT: ${{ secrets.PROJECT_ENDPOINT }}
+          AGENT_NAME: b3agent
           ISOLATION_KEY: pr-${{ github.event.pull_request.number }}-${{ github.run_id }}
-
           PROMPT: |
-            Use exclusivamente as ferramentas GitHub MCP.
+            Use exclusivamente as ferramentas GitHub MCP disponíveis no agente.
+
+            Analise o Pull Request abaixo:
 
             Repository:
             ${{ github.repository }}
 
             Pull Request:
             #${{ github.event.pull_request.number }}
+
+            Pull Request Title:
+            ${{ github.event.pull_request.title }}
 
             Base Branch:
             ${{ github.event.pull_request.base.ref }}
@@ -205,32 +137,96 @@ jobs:
             Commit SHA:
             ${{ github.event.pull_request.head.sha }}
 
-            Localize o PR.
-            Leia os arquivos alterados.
-            Leia o diff.
-            Gere um review em Markdown.
+            Tarefas obrigatórias:
 
+            1. Localize o Pull Request informado no GitHub.
+            2. Leia os arquivos alterados.
+            3. Leia o diff do Pull Request.
+            4. Analise:
+               - OWASP Top 10
+               - Segurança
+               - Bugs potenciais
+               - Performance
+               - Arquitetura
+               - Manutenibilidade
+               - Testes ausentes ou frágeis
+            5. Gere um review objetivo em Markdown.
+
+            Estrutura obrigatória:
+
+            ## Summary
+
+            ## Security
+
+            ## Architecture
+
+            ## Performance
+
+            ## Maintainability
+
+            ## Tests
+
+            ## Suggested Improvements
+
+            ## Approval Recommendation
+
+            No final, use uma destas recomendações:
+
+            APPROVE
+
+            COMMENT
+
+            REQUEST CHANGES
+
+            Não invente arquivos, linhas ou problemas. Se não conseguir acessar o PR pelo GitHub MCP, informe claramente o motivo.
         run: |
           python run_agent.py > review.md
 
-          echo "===== REVIEW ====="
+          echo "===== GENERATED REVIEW ====="
           cat review.md
 
-      - name: Publish Review
-        if: success()
+      - name: Publish or update PR comment
         uses: actions/github-script@v8
         with:
           script: |
-            const fs = require('fs');
+            const fs = require("fs");
 
-            const review = fs.readFileSync(
-              'review.md',
-              'utf8'
+            const marker = "<!-- foundry-agent-pr-review -->";
+            const review = fs.readFileSync("review.md", "utf8");
+
+            const body = `${marker}
+
+            # Foundry Agent PR Review
+
+            ${review}
+            `;
+
+            const { owner, repo } = context.repo;
+            const issue_number = context.payload.pull_request.number;
+
+            const comments = await github.rest.issues.listComments({
+              owner,
+              repo,
+              issue_number,
+              per_page: 100
+            });
+
+            const previousComment = comments.data.find(comment =>
+              comment.body && comment.body.includes(marker)
             );
 
-            await github.rest.issues.createComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.payload.pull_request.number,
-              body: review
-            });
+            if (previousComment) {
+              await github.rest.issues.updateComment({
+                owner,
+                repo,
+                comment_id: previousComment.id,
+                body
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner,
+                repo,
+                issue_number,
+                body
+              });
+            }
