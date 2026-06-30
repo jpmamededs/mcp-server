@@ -62,7 +62,7 @@ jobs:
           python-version: "3.11"
 
       - name: Install Azure AI dependencies
-        run: pip install azure-ai-projects
+        run: pip install "azure-ai-projects>=1.0.0" "azure-identity>=1.17.0"
 
       - name: Listar arquivos alterados no PR
         run: |
@@ -85,12 +85,17 @@ jobs:
           from azure.core.credentials import AzureKeyCredential
 
           # ── Autenticação via API Key (sem App Registration) ───────────────────
-          credential = AzureKeyCredential(os.environ["AZURE_AI_FOUNDRY_API_KEY"])
-          client = AIProjectClient(
-              endpoint=os.environ["AZURE_AI_FOUNDRY_ENDPOINT"],
-              credential=credential,
-          )
-          agent_id = os.environ["AZURE_AI_FOUNDRY_AGENT_ID"]
+          try:
+              credential = AzureKeyCredential(os.environ["AZURE_AI_FOUNDRY_API_KEY"])
+              client = AIProjectClient(
+                  endpoint=os.environ["AZURE_AI_FOUNDRY_ENDPOINT"],
+                  credential=credential,
+              )
+              agent_id = os.environ["AZURE_AI_FOUNDRY_AGENT_ID"]
+              print(f"✅ Conectado ao Azure AI Foundry: {os.environ['AZURE_AI_FOUNDRY_ENDPOINT']}")
+          except Exception as e:
+              print(f"❌ Erro ao conectar ao Azure AI: {e}")
+              raise
 
           # ── Ler conteúdo dos arquivos alterados ───────────────────────────────
           MAX_CHARS_PER_FILE = 8_000   # evita ultrapassar o limite de tokens
@@ -122,27 +127,54 @@ jobs:
               f"Arquivos alterados:{files_block}"
           )
 
-          # ── Criar thread e executar agente ────────────────────────────────────
-          thread = client.agents.create_thread()
-          client.agents.create_message(thread_id=thread.id, role="user", content=prompt)
-          run = client.agents.create_run(thread_id=thread.id, agent_id=agent_id)
+          try:
+              # ── Criar thread e executar agente ────────────────────────────────────
+              print("📝 Criando thread de conversação...")
+              thread = client.agents.create_thread()
+              print(f"✅ Thread criada: {thread.id}")
 
-          # Aguardar conclusão
-          while run.status in ("queued", "in_progress", "requires_action"):
-              time.sleep(3)
-              run = client.agents.get_run(thread_id=thread.id, run_id=run.id)
+              print("💬 Enviando prompt ao agente...")
+              client.agents.create_message(thread_id=thread.id, role="user", content=prompt)
 
-          if run.status != "completed":
-              raise RuntimeError(f"Agente encerrou com status inesperado: {run.status}")
+              print(f"🤖 Executando agente {agent_id}...")
+              run = client.agents.create_run(thread_id=thread.id, agent_id=agent_id)
+              print(f"⏳ Run ID: {run.id}")
 
-          # ── Recuperar resposta ────────────────────────────────────────────────
-          messages = client.agents.list_messages(thread_id=thread.id)
-          response_text = next(
-              (m.content[0].text.value for m in messages.data if m.role == "assistant"),
-              "O agente não retornou uma avaliação.",
-          )
+              # Aguardar conclusão
+              max_wait = 300  # 5 minutos
+              elapsed = 0
+              while run.status in ("queued", "in_progress", "requires_action") and elapsed < max_wait:
+                  time.sleep(5)
+                  elapsed += 5
+                  run = client.agents.get_run(thread_id=thread.id, run_id=run.id)
+                  print(f"   Status: {run.status} ({elapsed}s)")
 
-          # ── Postar como comentário no PR ──────────────────────────────────────
+              if elapsed >= max_wait:
+                  raise RuntimeError(f"Timeout: agente não completou em {max_wait}s")
+
+              if run.status != "completed":
+                  raise RuntimeError(f"Agente encerrou com status inesperado: {run.status}")
+
+              print("✅ Agente completou com sucesso")
+
+              # ── Recuperar resposta ────────────────────────────────────────────────
+              print("📖 Recuperando resposta...")
+              messages = client.agents.list_messages(thread_id=thread.id)
+              response_text = next(
+                  (m.content[0].text.value for m in messages.data if m.role == "assistant"),
+                  "O agente não retornou uma avaliação.",
+              )
+              print("✅ Resposta recuperada")
+
+          except AttributeError as e:
+              print(f"❌ Erro de API: {e}")
+              print("   Verificar se azure-ai-projects>=1.0.0 está instalado corretamente")
+              raise
+          except Exception as e:
+              print(f"❌ Erro ao executar agente: {e}")
+              raise
+
+          # ── Postar como comentário no PR ──────────────────────────────────────────
           changed_list = "\n".join(f"- `{p}`" for p in changed_files) or "- (nenhum)"
           body = (
               "## 🤖 Avaliação do Agente Azure AI Foundry\n\n"
