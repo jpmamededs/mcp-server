@@ -62,7 +62,7 @@ jobs:
           python-version: "3.11"
 
       - name: Install Azure AI dependencies
-        run: pip install requests
+        run: pip install "azure-ai-projects>=2.1.0"
 
       - name: Listar arquivos alterados no PR
         run: |
@@ -80,23 +80,20 @@ jobs:
           REPO: ${{ github.repository }}
         run: |
           python - << 'EOF'
-          import os, json, time, urllib.request
+          import os, json, urllib.request
+          from azure.ai.projects import AIProjectClient
+          from azure.core.credentials import AzureKeyCredential
 
           # Configuração
           endpoint = os.environ["AZURE_AI_FOUNDRY_ENDPOINT"].rstrip("/")
           api_key = os.environ["AZURE_AI_FOUNDRY_API_KEY"]
-          agent_id = os.environ["AZURE_AI_FOUNDRY_AGENT_ID"]
+          agent_name = "b3agent"  # nome do agente no Foundry
           repo = os.environ["REPO"]
           pr_number = os.environ["PR_NUMBER"]
           gh_token = os.environ["GH_TOKEN"]
 
-          headers = {
-              "api-key": api_key,
-              "Content-Type": "application/json",
-          }
-
-          print(f"✅ Configurado para {endpoint}")
-          print(f"🤖 Agente: {agent_id}")
+          print(f"✅ Conectando a {endpoint}")
+          print(f"🤖 Agente: {agent_name}")
 
           # ── Ler conteúdo dos arquivos alterados ───────────────────────────────
           MAX_CHARS_PER_FILE = 8_000
@@ -128,90 +125,37 @@ jobs:
           )
 
           try:
-              # ── 1. Criar thread ──────────────────────────────────────────────────
-              print("📝 Criando thread...")
-              thread_url = f"{endpoint}/threads"
-              thread_req = urllib.request.Request(
-                  thread_url,
-                  data=b"{}",
-                  headers=headers,
-                  method="POST"
-              )
-              thread_resp = urllib.request.urlopen(thread_req)
-              thread_data = json.loads(thread_resp.read().decode())
-              thread_id = thread_data["id"]
-              print(f"✅ Thread criada: {thread_id}")
+              credential = AzureKeyCredential(api_key)
+              with AIProjectClient(
+                  endpoint=endpoint,
+                  credential=credential,
+                  allow_preview=True,
+              ) as project_client:
+                  print("📝 Criando sessão...")
+                  session = project_client.beta.agents.create_session(
+                      agent_name=agent_name,
+                      isolation_key="github-actions",
+                  )
+                  print(f"✅ Sessão criada: {session.agent_session_id}")
 
-              # ── 2. Enviar mensagem ──────────────────────────────────────────────
-              print("💬 Enviando mensagem...")
-              msg_url = f"{endpoint}/threads/{thread_id}/messages"
-              msg_body = json.dumps({
-                  "role": "user",
-                  "content": prompt
-              }).encode()
-              msg_req = urllib.request.Request(
-                  msg_url,
-                  data=msg_body,
-                  headers=headers,
-                  method="POST"
-              )
-              urllib.request.urlopen(msg_req)
-              print("✅ Mensagem enviada")
-
-              # ── 3. Criar run ────────────────────────────────────────────────────
-              print(f"🤖 Executando agente...")
-              run_url = f"{endpoint}/threads/{thread_id}/runs"
-              run_body = json.dumps({
-                  "assistant_id": agent_id
-              }).encode()
-              run_req = urllib.request.Request(
-                  run_url,
-                  data=run_body,
-                  headers=headers,
-                  method="POST"
-              )
-              run_resp = urllib.request.urlopen(run_req)
-              run_data = json.loads(run_resp.read().decode())
-              run_id = run_data["id"]
-              print(f"⏳ Run ID: {run_id}")
-
-              # ── 4. Aguardar conclusão ────────────────────────────────────────────
-              max_wait = 300
-              elapsed = 0
-              while elapsed < max_wait:
-                  status_url = f"{endpoint}/threads/{thread_id}/runs/{run_id}"
-                  status_req = urllib.request.Request(status_url, headers=headers)
-                  status_resp = urllib.request.urlopen(status_req)
-                  status_data = json.loads(status_resp.read().decode())
-                  status = status_data["status"]
-
-                  if status == "completed":
-                      print("✅ Agente completou")
-                      break
-                  elif status in ("failed", "expired", "cancelled"):
-                      raise RuntimeError(f"Run falhou com status: {status}")
-                  
-                  print(f"   Status: {status} ({elapsed}s)")
-                  time.sleep(5)
-                  elapsed += 5
-              else:
-                  raise RuntimeError(f"Timeout: agente não completou em {max_wait}s")
-
-              # ── 5. Recuperar mensagens ───────────────────────────────────────────
-              print("📖 Recuperando resposta...")
-              msgs_url = f"{endpoint}/threads/{thread_id}/messages"
-              msgs_req = urllib.request.Request(msgs_url, headers=headers)
-              msgs_resp = urllib.request.urlopen(msgs_req)
-              msgs_data = json.loads(msgs_resp.read().decode())
-              
-              response_text = "O agente não retornou uma avaliação."
-              for msg in msgs_data.get("data", []):
-                  if msg.get("role") == "assistant":
-                      content = msg.get("content", [])
-                      if content and "text" in content[0]:
-                          response_text = content[0]["text"]["value"]
-                          break
-              print("✅ Resposta recuperada")
+                  try:
+                      print("🤖 Chamando agente...")
+                      openai_client = project_client.get_openai_client(agent_name=agent_name)
+                      response = openai_client.responses.create(
+                          input=prompt,
+                          extra_body={
+                              "agent_session_id": session.agent_session_id,
+                          },
+                      )
+                      response_text = response.output_text
+                      print("✅ Resposta recebida")
+                  finally:
+                      print("🧹 Limpando sessão...")
+                      project_client.beta.agents.delete_session(
+                          agent_name=agent_name,
+                          session_id=session.agent_session_id,
+                          isolation_key="github-actions",
+                      )
 
           except Exception as e:
               print(f"❌ Erro ao executar agente: {e}")
@@ -219,7 +163,7 @@ jobs:
               traceback.print_exc()
               raise
 
-          # ── 6. Postar comentário no PR ───────────────────────────────────────
+          # ── Postar comentário no PR ───────────────────────────────────────────
           changed_list = "\n".join(f"- `{p}`" for p in changed_files) or "- (nenhum)"
           body = (
               "## 🤖 Avaliação do Agente Azure AI Foundry\n\n"
