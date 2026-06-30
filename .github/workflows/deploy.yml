@@ -38,7 +38,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install "azure-ai-projects>=2.1.0" azure-identity openai
+          pip install "azure-ai-projects>=2.2.0" azure-identity openai
 
       - name: Create Foundry runner script
         run: |
@@ -48,11 +48,9 @@ jobs:
 
           from azure.identity import DefaultAzureCredential
           from azure.ai.projects import AIProjectClient
-          from azure.ai.projects.models import VersionRefIndicator
 
           endpoint = os.environ["PROJECT_ENDPOINT"]
           agent_name = os.environ.get("AGENT_NAME", "b3agent")
-          isolation_key = os.environ["ISOLATION_KEY"]
           prompt = os.environ["PROMPT"]
 
           with (
@@ -63,57 +61,31 @@ jobs:
                   allow_preview=True,
               ) as project_client,
           ):
-              agent = project_client.agents.get(
+              openai_client = project_client.get_openai_client(
                   agent_name=agent_name
               )
 
-              latest_version = agent.versions["latest"].version
-
-              session = project_client.beta.agents.create_session(
-                  agent_name=agent_name,
-                  isolation_key=isolation_key,
-                  version_indicator=VersionRefIndicator(
-                      agent_version=latest_version
-                  ),
+              response = openai_client.responses.create(
+                  input=prompt
               )
 
-              try:
-                  openai_client = project_client.get_openai_client(
-                      agent_name=agent_name
-                  )
+              output_text = getattr(response, "output_text", None)
 
-                  response = openai_client.responses.create(
-                      input=prompt,
-                      extra_body={
-                          "agent_session_id": session.agent_session_id
-                      },
-                  )
+              if not output_text or not output_text.strip():
+                  print("## Foundry Agent PR Review")
+                  print()
+                  print("O agente executou, mas não retornou conteúdo em `response.output_text`.")
+                  print()
+                  print("Verifique se o GitHub MCP do agente consegue acessar este Pull Request.")
+                  sys.exit(0)
 
-                  output_text = getattr(response, "output_text", None)
-
-                  if not output_text or not output_text.strip():
-                      print("## Foundry Agent PR Review")
-                      print()
-                      print("O agente executou, mas não retornou conteúdo em `response.output_text`.")
-                      print()
-                      print("Verifique se o GitHub MCP do agente consegue acessar este Pull Request.")
-                      sys.exit(0)
-
-                  print(output_text)
-
-              finally:
-                  project_client.beta.agents.delete_session(
-                      agent_name=agent_name,
-                      session_id=session.agent_session_id,
-                      isolation_key=isolation_key,
-                  )
+              print(output_text)
           PY
 
       - name: Run Foundry Agent
         env:
           PROJECT_ENDPOINT: ${{ secrets.PROJECT_ENDPOINT }}
           AGENT_NAME: b3agent
-          ISOLATION_KEY: pr-${{ github.event.pull_request.number }}-${{ github.run_id }}
           PROMPT: |
             Use exclusivamente as ferramentas GitHub MCP disponíveis no agente.
 
